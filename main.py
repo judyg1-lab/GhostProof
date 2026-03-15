@@ -13,7 +13,7 @@ while True:
     if not ret:
         break
 
-    cv2.putText(frame, "GhostProof Monitoring...", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+    cv2.putText(frame, "GhostProof Monitoring", (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
     cv2.imshow('GhostProof Edge AI Node', frame)
 
     key_input = cv2.waitKey(1) & 0xFF
@@ -28,7 +28,12 @@ while True:
         nonce = os.urandom(12)
         encrypted_data = aesgcm.encrypt(nonce, frame_bytes, None)
 
+        with open("evidence_shards.bin", "wb") as f:
+            f.write(encrypted_data)
+
         print(f"[Success] 影像已碎裂化並噴射至 IPFS 節點。加密長度: {len(encrypted_data)} bytes")
+
+        os.startfile("evidence_shards.bin")
 
     elif key_input == ord('q'):
         break
