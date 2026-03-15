@@ -1,0 +1,6 @@
+ghostproof_env/
+.venv/
+__pycache__/
+*.pyd
+*.dll
+*.exe
