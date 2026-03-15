@@ -38,20 +38,36 @@ GhostProof 旨在解決監控影像易因人為破壞或單點設備故障而遺
     2. 應急防護: 實作事件觸發機制，於偵測異常時 0.1s (希望)內完成影像鎖定與加密。
     3. 核心邏輯 (main.py):
     ```
-    if cv2.waitKey(1) & 0xFF == ord('s'):
+    if key_input == ord('s'):
+        print("\n[! ALERT] AI 偵測到暴力事件！啟動瞬間取證")
+
         _, buffer = cv2.imencode('.jpg', frame)
-        encrypted_data = AESGCM(key).encrypt(os.urandom(12),buffer.tobytes(), None)
-        print(f"[Success] Evidence Shard Generated: {len(encrypted_data)} bytes")
-    elif cv2.waitKey(1) & 0xFF == ord('q'):
-        break
+        frame_bytes = buffer.tobytes()
+
+        aesgcm = AESGCM(key)
+        nonce = os.urandom(12)
+        encrypted_data = aesgcm.encrypt(nonce, frame_bytes, None)
+
+        num_shards = 12
+        shard_size = len(encrypted_data) // num_shards
+
+        if not os.path.exists("shards"): os.makedirs("shards")
+
+        for i in range(num_shards):
+            start = i * shard_size
+
+            end = (i + 1) * shard_size if i != num_shards - 1 else len(encrypted_data)
+            with open(f"shards/shard_{i}.bin", "wb") as f:
+                f.write(encrypted_data[start:end])
     ```
 
 ## 開發規劃 (Roadmap)
 #### 第一階段：概念驗證 (Current Stage)
 - [x] 系統需求分析與技術選型
 - [x] PoC 概念驗證環境架設
-- [x] 基礎影像擷取、AES-256-GCM 加密與 Reed-Solomon 碎片化功能驗證
 - [x] 介接實體 USB Camera 進行端到端串流測試
+- [x] 核心技術驗證：完成基礎影像擷取、AES-256-GCM 加密實作
+- [x] 碎片化架構定義：確立 Reed-Solomon (RS) 容錯編碼參數（如 12, 8 方案）
 
 #### 第二階段：核心模組強化 (Short-term)
 - [ ] AI 推論優化：串接 YOLOv8 並使用 NVIDIA TensorRT 進行 FP16 量化，提升邊緣端偵測速度。
