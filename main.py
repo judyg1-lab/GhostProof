@@ -31,7 +31,7 @@ while True:
         with open("evidence_shards.bin", "wb") as f:
             f.write(encrypted_data)
 
-        print(f"[Success] 影像已碎裂化並噴射至 IPFS 節點。加密長度: {len(encrypted_data)} bytes")
+        print(f"[Success] 影像已完成盲儲存加密。加密長度: {len(encrypted_data)} bytes")
 
         os.startfile("evidence_shards.bin")
 
