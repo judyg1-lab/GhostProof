@@ -15,3 +15,5 @@ shards/
 
 # Generated binary artifacts
 *.bin
+
+key_shares/
