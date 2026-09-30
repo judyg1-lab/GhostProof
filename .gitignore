@@ -1,6 +1,17 @@
 ghostproof_env/
 .venv/
 __pycache__/
+
+*.pyc
 *.pyd
 *.dll
 *.exe
+
+# Runtime evidence output
+evidence/
+
+# Generated erasure-code shards
+shards/
+
+# Generated binary artifacts
+*.bin
