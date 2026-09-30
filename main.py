@@ -1,5 +1,6 @@
 import cv2
 import os
+import time
 
 from src.detector import PersonDetector
 from src.recorder import SegmentRecorder
@@ -14,39 +15,59 @@ from src.evidence_protection import protect_incident_video
 CAMERA_INDEX = 0
 
 
+# ============================================================
 # Continuous Recording
+# ============================================================
+
+# 正式環境：
+# 每 20 分鐘自動切一支監控影片
 RECORDING_SEGMENT_MINUTES = 20
+
+# 目前錄影模組使用的 FPS
 RECORDING_FPS = 20.0
 
 RECORDINGS_DIR = "recordings"
 
 
+# ============================================================
 # Incident Recording
+# ============================================================
+
+# 異常事件前保留 10 秒
 PRE_EVENT_SECONDS = 10
+
+# 異常事件發生後繼續錄 30 秒
 POST_EVENT_SECONDS = 30
 
 EVENTS_DIR = "events"
 
 
+# ============================================================
 # YOLO
+# ============================================================
+
 YOLO_CONFIDENCE = 0.7
+
+# AI trigger 後多久才能再次觸發
 TRIGGER_COOLDOWN = 10
 
-
-# Erasure Coding
-DATA_SHARDS = 8
-TOTAL_SHARDS = 12
-
-
-# Shamir Secret Sharing
-KEY_THRESHOLD = 3
-TOTAL_KEY_SHARES = 5
+# 不需要每一幀都跑 YOLO
+# 每 5 個 Camera frames 做一次推論
+YOLO_INFERENCE_INTERVAL = 5
 
 
-# Output directories
-EVIDENCE_DIR = "evidence"
-SHARDS_DIR = "shards"
-KEY_SHARES_DIR = "key_shares"
+# ============================================================
+# AI 啟用延遲
+# ============================================================
+
+# 系統剛啟動時先讓 pre-event buffer 累積。
+#
+# 如果一開 Camera 就立刻偵測到 person，
+# pre-buffer 根本還沒有 10 秒資料。
+#
+# 因此先錄滿 PRE_EVENT_SECONDS，
+# 再允許 AI 自動觸發。
+AI_WARMUP_SECONDS = PRE_EVENT_SECONDS
 
 
 # ============================================================
@@ -63,434 +84,19 @@ os.makedirs(
     exist_ok=True
 )
 
-os.makedirs(
-    EVIDENCE_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
-    SHARDS_DIR,
-    exist_ok=True
-)
-
-os.makedirs(
-    KEY_SHARES_DIR,
-    exist_ok=True
-)
-
 
 # ============================================================
-# GhostProof 取證函式
-# ============================================================
-
-def capture_evidence(
-    frame,
-    trigger_source,
-    trigger_confidence=None
-):
-
-    print(
-        "\n======================================"
-    )
-
-
-    if trigger_source == "AI":
-
-        print(
-            f"[AI TRIGGER] "
-            f"YOLO 偵測到 person，"
-            f"confidence={trigger_confidence:.2f}"
-        )
-
-    else:
-
-        print(
-            "[MANUAL TRIGGER] "
-            "使用者手動啟動取證"
-        )
-
-
-    print(
-        "[! ALERT] GhostProof 啟動瞬間取證"
-    )
-
-
-    # --------------------------------------------------------
-    # 1. Frame → JPEG
-    # --------------------------------------------------------
-
-    success, buffer = cv2.imencode(
-        ".jpg",
-        frame
-    )
-
-    if not success:
-
-        print(
-            "[ERROR] JPEG 編碼失敗"
-        )
-
-        return
-
-
-    frame_bytes = buffer.tobytes()
-
-
-    # --------------------------------------------------------
-    # 2. 儲存原始證據
-    # --------------------------------------------------------
-
-    original_path = os.path.join(
-        EVIDENCE_DIR,
-        "original.jpg"
-    )
-
-
-    with open(
-        original_path,
-        "wb"
-    ) as f:
-
-        f.write(
-            frame_bytes
-        )
-
-
-    print(
-        f"[1/6] 原始證據已儲存："
-        f"{original_path}"
-    )
-
-
-    # --------------------------------------------------------
-    # 3. AES-256-GCM
-    # --------------------------------------------------------
-
-    nonce, encrypted_data = encrypt_data(
-        frame_bytes,
-        key
-    )
-
-
-    encrypted_path = os.path.join(
-        EVIDENCE_DIR,
-        "encrypted.bin"
-    )
-
-    nonce_path = os.path.join(
-        EVIDENCE_DIR,
-        "nonce.bin"
-    )
-
-
-    with open(
-        encrypted_path,
-        "wb"
-    ) as f:
-
-        f.write(
-            encrypted_data
-        )
-
-
-    with open(
-        nonce_path,
-        "wb"
-    ) as f:
-
-        f.write(
-            nonce
-        )
-
-
-    print(
-        "[2/6] AES-256-GCM 加密完成"
-    )
-
-
-    # --------------------------------------------------------
-    # 4. 8-of-12 Erasure Coding
-    # --------------------------------------------------------
-
-    shards, original_encrypted_size = (
-        encode_shards(
-            encrypted_data
-        )
-    )
-
-
-    original_hash = calculate_sha256(
-        frame_bytes
-    )
-
-
-    # --------------------------------------------------------
-    # Metadata
-    # --------------------------------------------------------
-
-    metadata = {
-        "trigger_source":
-            trigger_source,
-
-        "trigger_confidence":
-            trigger_confidence,
-
-        "encrypted_size":
-            original_encrypted_size,
-
-        "original_sha256":
-            original_hash,
-
-        "data_shards":
-            DATA_SHARDS,
-
-        "total_shards":
-            TOTAL_SHARDS,
-
-        "key_threshold":
-            KEY_THRESHOLD,
-
-        "total_key_shares":
-            TOTAL_KEY_SHARES
-    }
-
-
-    metadata_path = os.path.join(
-        EVIDENCE_DIR,
-        "metadata.json"
-    )
-
-
-    with open(
-        metadata_path,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        json.dump(
-            metadata,
-            f,
-            indent=4
-        )
-
-
-    # --------------------------------------------------------
-    # 儲存 12 個 evidence shards
-    # --------------------------------------------------------
-
-    for i, shard in enumerate(
-        shards
-    ):
-
-        shard_path = os.path.join(
-            SHARDS_DIR,
-            f"shard_{i}.bin"
-        )
-
-
-        with open(
-            shard_path,
-            "wb"
-        ) as f:
-
-            f.write(
-                shard
-            )
-
-
-    print(
-        f"[3/6] 已完成 "
-        f"{DATA_SHARDS}-of-{TOTAL_SHARDS} "
-        f"Erasure Coding，"
-        f"產生 {len(shards)} 個 shards"
-    )
-
-
-    # --------------------------------------------------------
-    # 5. 本地 AES 解密測試
-    # --------------------------------------------------------
-
-    try:
-
-        recovered_bytes = decrypt_data(
-            encrypted_data,
-            key,
-            nonce
-        )
-
-    except Exception as e:
-
-        print(
-            f"[ERROR] AES 解密失敗：{e}"
-        )
-
-        return
-
-
-    # --------------------------------------------------------
-    # 6. 儲存本地還原影像
-    # --------------------------------------------------------
-
-    recovered_path = os.path.join(
-        EVIDENCE_DIR,
-        "recovered.jpg"
-    )
-
-
-    with open(
-        recovered_path,
-        "wb"
-    ) as f:
-
-        f.write(
-            recovered_bytes
-        )
-
-
-    print(
-        f"[4/6] 解密完成："
-        f"{recovered_path}"
-    )
-
-
-    # --------------------------------------------------------
-    # 7. SHA-256
-    # --------------------------------------------------------
-
-    recovered_hash = calculate_sha256(
-        recovered_bytes
-    )
-
-
-    hash_path = os.path.join(
-        EVIDENCE_DIR,
-        "evidence.sha256"
-    )
-
-
-    with open(
-        hash_path,
-        "w",
-        encoding="utf-8"
-    ) as f:
-
-        f.write(
-            original_hash
-        )
-
-
-    print(
-        f"[5/6] Original SHA-256 : "
-        f"{original_hash}"
-    )
-
-    print(
-        f"      Recovered SHA-256: "
-        f"{recovered_hash}"
-    )
-
-
-    if verify_integrity(
-        frame_bytes,
-        recovered_bytes
-    ):
-
-        print(
-            "[PASS] 證據完整性驗證成功，"
-            "資料未遭竄改"
-        )
-
-    else:
-
-        print(
-            "[FAIL] 證據完整性驗證失敗"
-        )
-
-
-    print(
-        "[6/6] GhostProof 完整取證流程完成"
-    )
-
-
-    # --------------------------------------------------------
-    # Summary
-    # --------------------------------------------------------
-
-    print(
-        "\n------------- Summary --------------"
-    )
-
-    print(
-        "Trigger source   :",
-        trigger_source
-    )
-
-
-    if trigger_confidence is not None:
-
-        print(
-            "AI confidence   :",
-            f"{trigger_confidence:.2f}"
-        )
-
-
-    print(
-        "Original size    :",
-        len(frame_bytes),
-        "bytes"
-    )
-
-    print(
-        "Encrypted size   :",
-        len(encrypted_data),
-        "bytes"
-    )
-
-    print(
-        "Nonce size       :",
-        len(nonce),
-        "bytes"
-    )
-
-    print(
-        "AES key size     :",
-        len(key),
-        "bytes"
-    )
-
-    print(
-        "Evidence shards  :",
-        len(shards)
-    )
-
-    print(
-        "Key shares       :",
-        len(key_shares)
-    )
-
-    print(
-        "------------------------------------"
-    )
-
-    print(
-        "======================================\n"
-    )
-
-
-# ============================================================
-# 初始化 YOLO
+# 初始化 YOLO Detector
 # ============================================================
 
 print(
     "[AI] 正在初始化 YOLO 模型..."
 )
 
-
 detector = PersonDetector(
     confidence_threshold=YOLO_CONFIDENCE,
     cooldown_seconds=TRIGGER_COOLDOWN
 )
-
 
 print(
     f"[AI] YOLO 初始化完成，"
@@ -527,6 +133,11 @@ recorder = SegmentRecorder(
     fps=RECORDING_FPS
 )
 
+
+# ============================================================
+# 初始化 Incident Recorder
+# ============================================================
+
 incident_recorder = IncidentRecorder(
     output_dir=EVENTS_DIR,
     fps=RECORDING_FPS,
@@ -534,6 +145,26 @@ incident_recorder = IncidentRecorder(
     post_event_seconds=POST_EVENT_SECONDS
 )
 
+
+# ============================================================
+# 執行狀態
+# ============================================================
+
+frame_counter = 0
+
+system_start_time = time.time()
+
+# 上一次 YOLO 推論結果
+confidence = 0.0
+cooldown_remaining = 0.0
+
+# 顯示用
+last_annotated_frame = None
+
+
+# ============================================================
+# 系統資訊
+# ============================================================
 
 print(
     "\nGhostProof Edge AI 監測系統啟動"
@@ -550,9 +181,19 @@ print(
 )
 
 print(
+    f"YOLO Interval        : "
+    f"每 {YOLO_INFERENCE_INTERVAL} frames 推論一次"
+)
+
+print(
     f"Incident Recording   : "
     f"前 {PRE_EVENT_SECONDS}s + "
     f"後 {POST_EVENT_SECONDS}s"
+)
+
+print(
+    f"AI Warmup            : "
+    f"{AI_WARMUP_SECONDS} seconds"
 )
 
 print(
@@ -562,7 +203,7 @@ print(
 
 print(
     "Manual               : "
-    "按 's' 手動取證"
+    "按 's' 手動觸發事件"
 )
 
 print(
@@ -578,7 +219,7 @@ print(
 while True:
 
     # --------------------------------------------------------
-    # Camera Frame
+    # 1. Camera Frame
     # --------------------------------------------------------
 
     ret, frame = cap.read()
@@ -593,8 +234,11 @@ while True:
         break
 
 
+    frame_counter += 1
+
+
     # ========================================================
-    # Continuous Recording
+    # 2. 一般監控持續錄影
     # ========================================================
 
     recorder.write(
@@ -603,7 +247,16 @@ while True:
 
 
     # ========================================================
-    # Incident Pre-event Buffer / Event Recording
+    # 3. Incident Recorder
+    #
+    # 平常：
+    #   將 frame 放進 pre-event buffer
+    #
+    # Incident recording：
+    #   持續寫入事件影片
+    #
+    # 事件完成：
+    #   回傳 completed_event
     # ========================================================
 
     completed_event = (
@@ -612,52 +265,123 @@ while True:
         )
     )
 
+
+    # ========================================================
+    # 4. 如果 Incident 剛錄製完成
+    #    執行 GhostProof Protection
+    # ========================================================
+
     if completed_event is not None:
 
-        protect_incident_video(
-            incident_path=completed_event[
-                "incident_path"
-            ],
-            event_dir=completed_event[
-                "event_dir"
-            ]
+        print(
+            "\n[EVENT] Incident recording completed"
         )
 
+        try:
+
+            protect_incident_video(
+                incident_path=completed_event[
+                    "incident_path"
+                ],
+                event_dir=completed_event[
+                    "event_dir"
+                ]
+            )
+
+        except Exception as e:
+
+            print(
+                "[ERROR] Incident protection failed:"
+            )
+
+            print(
+                e
+            )
+
 
     # ========================================================
-    # YOLO 推論
+    # 5. 判斷 AI 是否已完成 Warmup
     # ========================================================
 
-    (
-        ai_triggered,
-        annotated_frame,
-        confidence,
-        cooldown_remaining
-    ) = detector.detect(
-        frame
+    elapsed_since_start = (
+        time.time()
+        - system_start_time
+    )
+
+
+    ai_ready = (
+        elapsed_since_start
+        >= AI_WARMUP_SECONDS
     )
 
 
     # ========================================================
-    # 顯示畫面
+    # 6. YOLO 推論
     # ========================================================
 
-    display_frame = annotated_frame
+    ai_triggered = False
 
+
+    # 不需要每一幀都做 YOLO
+    if (
+        frame_counter
+        % YOLO_INFERENCE_INTERVAL
+        == 0
+    ):
+
+        (
+            detected_trigger,
+            annotated_frame,
+            confidence,
+            cooldown_remaining
+        ) = detector.detect(
+            frame
+        )
+
+
+        # 只有 Warmup 完成後
+        # 才允許 AI trigger
+        if ai_ready:
+
+            ai_triggered = (
+                detected_trigger
+            )
+
+
+        last_annotated_frame = (
+            annotated_frame
+        )
+
+
+    # ========================================================
+    # 7. 顯示畫面
+    # ========================================================
+
+    # 有 YOLO 畫框時用 YOLO frame，
+    # 沒跑 YOLO 的 frame 就顯示原始影像。
+    #
+    # 不直接重複 last annotated frame，
+    # 避免畫面看起來卡住。
+    display_frame = frame.copy()
+
+
+    # --------------------------------------------------------
+    # 系統名稱
+    # --------------------------------------------------------
 
     cv2.putText(
         display_frame,
         "GhostProof Monitoring",
         (10, 30),
         cv2.FONT_HERSHEY_SIMPLEX,
-        1,
+        0.8,
         (0, 255, 0),
         2
     )
 
 
     # --------------------------------------------------------
-    # Continuous Recording 狀態
+    # REC
     # --------------------------------------------------------
 
     cv2.putText(
@@ -672,6 +396,47 @@ while True:
 
 
     # --------------------------------------------------------
+    # AI Warmup
+    # --------------------------------------------------------
+
+    if not ai_ready:
+
+        warmup_remaining = max(
+            0.0,
+            (
+                AI_WARMUP_SECONDS
+                - elapsed_since_start
+            )
+        )
+
+
+        cv2.putText(
+            display_frame,
+            (
+                f"AI Warmup: "
+                f"{warmup_remaining:.1f}s"
+            ),
+            (10, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 255),
+            2
+        )
+
+    else:
+
+        cv2.putText(
+            display_frame,
+            "AI READY",
+            (10, 100),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.7,
+            (0, 255, 0),
+            2
+        )
+
+
+    # --------------------------------------------------------
     # Person Confidence
     # --------------------------------------------------------
 
@@ -679,8 +444,11 @@ while True:
 
         cv2.putText(
             display_frame,
-            f"Person confidence: {confidence:.2f}",
-            (10, 100),
+            (
+                f"Person confidence: "
+                f"{confidence:.2f}"
+            ),
+            (10, 135),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (255, 255, 0),
@@ -696,11 +464,31 @@ while True:
 
         cv2.putText(
             display_frame,
-            f"Cooldown: {cooldown_remaining:.1f}s",
-            (10, 135),
+            (
+                f"Cooldown: "
+                f"{cooldown_remaining:.1f}s"
+            ),
+            (10, 170),
             cv2.FONT_HERSHEY_SIMPLEX,
             0.7,
             (0, 255, 255),
+            2
+        )
+
+
+    # --------------------------------------------------------
+    # Incident Recording
+    # --------------------------------------------------------
+
+    if incident_recorder.recording:
+
+        cv2.putText(
+            display_frame,
+            "INCIDENT RECORDING",
+            (10, 210),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.8,
+            (0, 0, 255),
             2
         )
 
@@ -714,13 +502,17 @@ while True:
         cv2.putText(
             display_frame,
             "GHOSTPROOF TRIGGER",
-            (10, 175),
+            (10, 250),
             cv2.FONT_HERSHEY_SIMPLEX,
-            1,
+            0.9,
             (0, 0, 255),
             2
         )
 
+
+    # ========================================================
+    # 8. 顯示 Camera
+    # ========================================================
 
     cv2.imshow(
         "GhostProof Edge AI Node",
@@ -729,7 +521,7 @@ while True:
 
 
     # ========================================================
-    # Keyboard Input
+    # 9. Keyboard Input
     # ========================================================
 
     key_input = (
@@ -739,15 +531,27 @@ while True:
 
 
     manual_triggered = (
-        key_input == ord("s")
+        key_input
+        == ord("s")
     )
 
 
     # ========================================================
-    # GhostProof Trigger
+    # 10. Incident Trigger
     # ========================================================
 
+    # --------------------------------------------------------
+    # AI Trigger
+    # --------------------------------------------------------
+
     if ai_triggered:
+
+        print(
+            "\n[AI TRIGGER] "
+            f"person detected "
+            f"confidence={confidence:.2f}"
+        )
+
 
         incident_recorder.trigger(
             frame=frame,
@@ -756,7 +560,20 @@ while True:
         )
 
 
+    # --------------------------------------------------------
+    # Manual Trigger
+    #
+    # Manual 不受 warmup 限制，
+    # 方便測試。
+    # --------------------------------------------------------
+
     elif manual_triggered:
+
+        print(
+            "\n[MANUAL TRIGGER] "
+            "使用者手動啟動 Incident"
+        )
+
 
         incident_recorder.trigger(
             frame=frame,
@@ -765,7 +582,7 @@ while True:
 
 
     # ========================================================
-    # Exit
+    # 11. Exit
     # ========================================================
 
     if key_input == ord("q"):
@@ -774,7 +591,17 @@ while True:
 
 
 # ============================================================
-# 清理
+# 程式關閉
+# ============================================================
+
+print(
+    "\n[SHUTDOWN] GhostProof 正在關閉..."
+)
+
+
+# ============================================================
+# 如果 Incident 還沒錄完
+# 先安全完成它
 # ============================================================
 
 completed_event = (
@@ -782,27 +609,47 @@ completed_event = (
 )
 
 
-# 如果關閉程式時，
-# 剛好還有 Incident 正在錄製，
-# 仍然要完成保護流程
 if completed_event is not None:
 
     print(
-        "\n[SHUTDOWN] "
+        "[SHUTDOWN] "
         "偵測到尚未完成保護的事件"
     )
 
-    protect_incident_video(
-        incident_path=completed_event[
-            "incident_path"
-        ],
-        event_dir=completed_event[
-            "event_dir"
-        ]
-    )
 
+    try:
+
+        protect_incident_video(
+            incident_path=completed_event[
+                "incident_path"
+            ],
+            event_dir=completed_event[
+                "event_dir"
+            ]
+        )
+
+    except Exception as e:
+
+        print(
+            "[ERROR] Shutdown incident "
+            "protection failed:"
+        )
+
+        print(
+            e
+        )
+
+
+# ============================================================
+# 關閉 Continuous Recorder
+# ============================================================
 
 recorder.close()
+
+
+# ============================================================
+# Camera Cleanup
+# ============================================================
 
 cap.release()
 

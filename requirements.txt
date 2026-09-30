@@ -1,0 +1,4 @@
+opencv-python
+cryptography
+zfec
+ultralytics

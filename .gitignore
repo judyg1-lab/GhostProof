@@ -6,6 +6,7 @@ __pycache__/
 *.pyd
 *.dll
 *.exe
+*.pt
 
 # Runtime evidence output
 evidence/
@@ -23,3 +24,6 @@ recordings_test/
 
 events/
 events_test/
+
+key_nodes/
+key_nodes_test/

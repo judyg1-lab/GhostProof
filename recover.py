@@ -6,10 +6,17 @@ from src.crypto import decrypt_data
 from src.erasure import decode_shards
 from src.integrity import calculate_sha256
 from src.secret_sharing import recover_secret
+from src.ipfs_storage import IPFSStorage
+from src.key_share_storage import KeyShareStorage
 
 
 EVENTS_DIR = "events"
+KEY_NODES_DIR = "key_nodes"
 
+
+# ============================================================
+# Metadata
+# ============================================================
 
 def load_metadata(
     event_dir
@@ -38,17 +45,70 @@ def load_metadata(
         )
 
 
+# ============================================================
+# Evidence Shards
+# ============================================================
+
 def load_available_shards(
     event_dir,
-    total_shards
+    metadata
 ):
+    """
+    優先讀取本機 shard。
+
+    如果本機 shard 不存在，
+    則根據 metadata.json 裡的 CID
+    從 IPFS 下載。
+
+    只要取得 data_shards 數量即可停止。
+    """
+
+    total_shards = metadata[
+        "total_shards"
+    ]
+
+    data_shards = metadata[
+        "data_shards"
+    ]
+
+
     shards_dir = os.path.join(
         event_dir,
         "shards"
     )
 
+
+    os.makedirs(
+        shards_dir,
+        exist_ok=True
+    )
+
+
     available_shards = []
     shard_indices = []
+
+
+    # --------------------------------------------------------
+    # 建立 index → CID 對照表
+    # --------------------------------------------------------
+
+    ipfs_entries = {
+        int(item["index"]):
+            item["cid"]
+
+        for item in metadata.get(
+            "ipfs_shards",
+            []
+        )
+    }
+
+
+    ipfs = IPFSStorage()
+
+
+    # --------------------------------------------------------
+    # 尋找 shards
+    # --------------------------------------------------------
 
     for i in range(
         total_shards
@@ -58,6 +118,11 @@ def load_available_shards(
             shards_dir,
             f"shard_{i}.bin"
         )
+
+
+        # ====================================================
+        # Case 1：本機 shard 存在
+        # ====================================================
 
         if os.path.exists(
             shard_path
@@ -70,6 +135,7 @@ def load_available_shards(
 
                 shard_data = f.read()
 
+
             available_shards.append(
                 shard_data
             )
@@ -78,65 +144,121 @@ def load_available_shards(
                 i
             )
 
+
+            print(
+                f"[LOCAL] shard_{i}.bin"
+            )
+
+
+        # ====================================================
+        # Case 2：本機沒有 → 從 IPFS 下載
+        # ====================================================
+
+        elif i in ipfs_entries:
+
+            cid = ipfs_entries[
+                i
+            ]
+
+
+            print(
+                f"[IPFS] Recovering "
+                f"shard_{i}.bin"
+            )
+
+            print(
+                f"       CID: {cid}"
+            )
+
+
+            try:
+
+                ipfs.get_file(
+                    cid,
+                    shard_path
+                )
+
+
+                with open(
+                    shard_path,
+                    "rb"
+                ) as f:
+
+                    shard_data = f.read()
+
+
+                available_shards.append(
+                    shard_data
+                )
+
+                shard_indices.append(
+                    i
+                )
+
+
+                print(
+                    f"[PASS] shard_{i}.bin "
+                    f"retrieved from IPFS"
+                )
+
+
+            except Exception as e:
+
+                print(
+                    f"[WARN] shard_{i}.bin "
+                    f"IPFS retrieval failed: {e}"
+                )
+
+
+        # ====================================================
+        # 已取得足夠數量就停止
+        # ====================================================
+
+        if len(
+            available_shards
+        ) >= data_shards:
+
+            break
+
+
     return (
         available_shards,
         shard_indices
     )
 
 
-def load_available_key_shares(
-    event_dir,
+# ============================================================
+# Key Shares
+# ============================================================
+
+def load_distributed_key_shares(
+    event_name,
     total_key_shares
 ):
-    key_shares_dir = os.path.join(
-        event_dir,
-        "key_shares"
+    """
+    從 key_nodes/
+    掃描目前可取得的 Shamir shares。
+    """
+
+    key_storage = KeyShareStorage(
+        base_dir=KEY_NODES_DIR,
+        total_nodes=total_key_shares
     )
 
-    shares = []
 
-    for i in range(
-        1,
-        total_key_shares + 1
-    ):
-
-        share_path = os.path.join(
-            key_shares_dir,
-            f"share_{i}.json"
+    shares = (
+        key_storage.load_available_shares(
+            event_name
         )
+    )
 
-        if not os.path.exists(
-            share_path
-        ):
-            continue
-
-        with open(
-            share_path,
-            "r",
-            encoding="utf-8"
-        ) as f:
-
-            share_data = json.load(
-                f
-            )
-
-        shares.append(
-            (
-                int(
-                    share_data[
-                        "x"
-                    ]
-                ),
-                int(
-                    share_data[
-                        "y"
-                    ]
-                )
-            )
-        )
 
     return shares
 
+
+# ============================================================
+# Recovery
+# ============================================================
 
 def recover_event(
     event_name
@@ -202,6 +324,10 @@ def recover_event(
         return False
 
 
+    # ========================================================
+    # Metadata fields
+    # ========================================================
+
     encrypted_size = metadata[
         "encrypted_size"
     ]
@@ -239,7 +365,7 @@ def recover_event(
 
 
     # ========================================================
-    # 2. 找出現有 evidence shards
+    # 2. 取得 Evidence Shards
     # ========================================================
 
     (
@@ -247,7 +373,7 @@ def recover_event(
         shard_indices
     ) = load_available_shards(
         event_dir,
-        total_shards
+        metadata
     )
 
 
@@ -275,7 +401,7 @@ def recover_event(
 
 
     # ========================================================
-    # 3. 還原 encrypted incident
+    # 3. 重建 Encrypted Incident
     # ========================================================
 
     try:
@@ -305,12 +431,14 @@ def recover_event(
 
 
     # ========================================================
-    # 4. 找出現有 key shares
+    # 4. 從 Key Nodes 尋找 Shamir Shares
     # ========================================================
 
-    shares = load_available_key_shares(
-        event_dir,
-        total_key_shares
+    shares = (
+        load_distributed_key_shares(
+            event_name,
+            total_key_shares
+        )
     )
 
 
@@ -343,20 +471,29 @@ def recover_event(
         return False
 
 
-    # 只取 threshold 份即可
+    # ========================================================
+    # 只需要 threshold 份
+    # ========================================================
+
     selected_shares = shares[
         :key_threshold
     ]
 
 
+    selected_indices = [
+        x
+        for x, _ in selected_shares
+    ]
+
+
     print(
-        "Selected key shares  : "
-        f"{[x for x, _ in selected_shares]}"
+        f"Selected key shares  : "
+        f"{selected_indices}"
     )
 
 
     # ========================================================
-    # 5. 重建 AES Key
+    # 5. Shamir → AES Key
     # ========================================================
 
     try:
@@ -385,7 +522,7 @@ def recover_event(
 
 
     # ========================================================
-    # 6. 讀取 nonce
+    # 6. Nonce
     # ========================================================
 
     nonce_path = os.path.join(
@@ -414,7 +551,7 @@ def recover_event(
 
 
     # ========================================================
-    # 7. AES-GCM 解密
+    # 7. AES-256-GCM Decryption
     # ========================================================
 
     try:
@@ -441,7 +578,7 @@ def recover_event(
 
 
     # ========================================================
-    # 8. SHA-256
+    # 8. SHA-256 Integrity Verification
     # ========================================================
 
     recovered_hash = calculate_sha256(
@@ -463,7 +600,8 @@ def recover_event(
     if recovered_hash != expected_hash:
 
         print(
-            "[FAIL] Evidence integrity verification failed"
+            "[FAIL] Evidence integrity "
+            "verification failed"
         )
 
         return False
@@ -475,7 +613,7 @@ def recover_event(
 
 
     # ========================================================
-    # 9. 儲存 recovered incident
+    # 9. 儲存 Recovered Incident
     # ========================================================
 
     recovered_path = os.path.join(
@@ -497,6 +635,40 @@ def recover_event(
     print(
         f"[PASS] Recovered incident saved: "
         f"{recovered_path}"
+    )
+
+
+    # ========================================================
+    # Summary
+    # ========================================================
+
+    print(
+        "\n--------------------------------------"
+    )
+
+    print(
+        "Recovery source"
+    )
+
+    print(
+        f"Evidence shards : "
+        f"{len(available_shards)}/"
+        f"{total_shards}"
+    )
+
+    print(
+        f"Key shares      : "
+        f"{len(shares)}/"
+        f"{total_key_shares}"
+    )
+
+    print(
+        f"Selected shares : "
+        f"{selected_indices}"
+    )
+
+    print(
+        "--------------------------------------"
     )
 
 
