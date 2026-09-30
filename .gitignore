@@ -17,3 +17,9 @@ shards/
 *.bin
 
 key_shares/
+
+recordings/
+recordings_test/
+
+events/
+events_test/
