@@ -1,39 +1,48 @@
 import os
+import shutil
 import subprocess
-
-
-DEFAULT_IPFS_EXE = (
-    r"C:\Users\sxdhw\Apps"
-    r"\kubo_v0.43.1"
-    r"\kubo"
-    r"\ipfs.exe"
-)
 
 
 class IPFSStorage:
 
     def __init__(
         self,
-        ipfs_executable=DEFAULT_IPFS_EXE
+        ipfs_executable=None
     ):
-        self.ipfs_executable = ipfs_executable
+        # 如果沒有手動指定，
+        # 自動從系統 PATH 找 ipfs
+        if ipfs_executable is None:
+
+            ipfs_executable = shutil.which(
+                "ipfs"
+            )
+
+        if ipfs_executable is None:
+
+            raise FileNotFoundError(
+                "找不到 Kubo IPFS 執行檔。"
+                "請確認已安裝 Kubo，"
+                "且 ipfs 已加入 PATH。"
+            )
+
+        self.ipfs_executable = (
+            ipfs_executable
+        )
 
 
     def add_file(
         self,
         file_path
     ):
-        """
-        將檔案加入 IPFS，
-        回傳 CID。
-        """
 
         if not os.path.exists(
             file_path
         ):
+
             raise FileNotFoundError(
                 file_path
             )
+
 
         result = subprocess.run(
             [
@@ -47,12 +56,16 @@ class IPFSStorage:
             check=True
         )
 
+
         cid = result.stdout.strip()
 
+
         if not cid:
+
             raise RuntimeError(
                 "IPFS 沒有回傳 CID"
             )
+
 
         return cid
 
@@ -62,9 +75,6 @@ class IPFSStorage:
         cid,
         output_path
     ):
-        """
-        透過 CID 從 IPFS 取回檔案。
-        """
 
         subprocess.run(
             [
@@ -76,5 +86,6 @@ class IPFSStorage:
             ],
             check=True
         )
+
 
         return output_path
